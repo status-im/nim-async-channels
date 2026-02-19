@@ -14,5 +14,5 @@ proc test(env, path: string) =
 
 task test, "Runs the test suite":
   for f in ["tests/test_asyncchannels.nim", "examples/sha256sum.nim"]:
-    for opt in ["--mm:orc", "--mm:refc"]:
+    for opt in ["--mm:orc", "--mm:refc", "-d:release -d:gcAssert -d:sysAssert"]:
       test opt, f
