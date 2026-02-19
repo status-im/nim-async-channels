@@ -11,7 +11,7 @@ jobs:
     uses: status-im/nimbus-common-workflow/.github/workflows/common.yml@main
     with:
       nim-versions: '["version-2-0", "version-2-2", "devel"]'
-      nimble-version: 0.22.0
+      nimble-version: v0.22.0
       test-command: |
         nimble setup -l
         nimble test
