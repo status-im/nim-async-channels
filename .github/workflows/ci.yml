@@ -19,9 +19,8 @@ jobs:
   nph:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Check `nph` formatting
         uses: arnetheduck/nph-action@v1
         with:
           version: 0.7.0
-
