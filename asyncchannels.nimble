@@ -13,12 +13,11 @@ proc test(env, path: string) =
   exec "nim c " & env & " -r " & path
 
 task test, "Runs the test suite":
-  let
-    tests = ["tests/test_asyncchannels.nim"]
-      when (NimMajor, NimMinor) >= (2, 2):
-        ["tests/test_asyncchannels.nim", "examples/sha256sum.nim"]
-      else:
-        ["tests/test_asyncchannels.nim"]
+  let tests =
+    when (NimMajor, NimMinor) >= (2, 2):
+      ["tests/test_asyncchannels.nim", "examples/sha256sum.nim"]
+    else:
+      ["tests/test_asyncchannels.nim"]
   for f in tests:
     for opt in ["--mm:orc", "--mm:refc", "-d:release -d:gcAssert -d:sysAssert"]:
       test opt, f
