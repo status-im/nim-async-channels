@@ -148,7 +148,7 @@ proc recv*[T](
     except AsyncError as exc:
       raiseAssert exc.msg
 
-proc sendSync*[T](tc: var AsyncChannel[T], msg: sink auto) =
+proc sendSync*[T, U](tc: var AsyncChannel[T], msg: sink U) =
   ## Send `msg` on the channel synchronously - this function may block when too
   ## many tasks have been posted to the channel and no consumer is there to
   ## process them - the limit is OS-dependent due to the cross-thread signalling
