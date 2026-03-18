@@ -12,8 +12,14 @@ Key implementation details:
 
 - Copies: In `refc`, items are deep-copied by the underlying `Channel` while
   holding a lock. Keep messages small or pass handles to off-channel buffers.
-- open/close: open allocates signaling resources (can fail), close must be
-  called once the channel is drained and no tasks are waiting.
+- open/close: open allocates signaling resources (can fail). close rejects new
+  operations, wakes blocked receivers and waits for in-flight send/receive
+  operations to leave the shared state before releasing resources.
+- lifecycle: `close` on a channel that was never opened is a no-op. `open` is
+  one-shot: double-open is rejected, and reopening a closed channel is also
+  rejected.
+- misuse after close: `sendSync` and `recv` raise `AssertionDefect` if called on
+  a channel that is not open anymore.
 - Chronos-only wakeups: `AsyncChannel` can wake `chronos`-managed threads/tasks.
   It cannot wake non-`chronos` threads — use plain `Channel` for that direction.
 - GC compatibility: the channel works with `refc` and `orc` but your payload may

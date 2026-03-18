@@ -1,10 +1,20 @@
 {.push raises: [], gcsafe.}
 
-import std/typetraits, chronos, chronos/threadsync, results
+import std/typetraits, std/atomics, std/os, chronos, chronos/threadsync, results
 
 export chronos, threadsync, results
 
 const asyncchannelsHints {.booldefine.} = true
+
+# Packed state layout: bit 0 means "open", bit 1 means "closing", and the
+# remaining high bits store the number of in-flight send/recv operations.
+# Each active operation adds/subtracts `asyncChannelRefUnit`, leaving the flag
+# bits untouched while `close` waits for the count to drain to zero.
+const
+  asyncChannelOpenBit = 1'u
+  asyncChannelClosingBit = 2'u
+  asyncChannelRefShift = 2
+  asyncChannelRefUnit = 1'u shl asyncChannelRefShift
 
 type AsyncChannel*[TMsg] = object
   ## Async, unbounded MPMC channel suitable for usage with chronos' `async`
@@ -13,8 +23,9 @@ type AsyncChannel*[TMsg] = object
   ##
   ## Channel lifetime is controlled by `open` and `close` - before `close` is
   ## used, the caller is responsible for making sure that all work posted to
-  ## the channel has been drained and that no threads are waiting for work, or
-  ## memory leaks and crashes may happen.
+  ## the channel has been drained if it matters. Once `close` starts, new
+  ## operations are rejected and the call waits for in-flight `recv` and
+  ## `sendSync` operations to leave the shared state before freeing resources.
   ##
   ## Performance-wise, the channel is suitable for use cases where tasks are:
   ##
@@ -68,6 +79,28 @@ type AsyncChannel*[TMsg] = object
     #      for some reason, `Channel` holds a lock while performing the copy
 
   sig: ThreadSignalPtr
+  state: Atomic[uint]
+
+template activeOps(state: uint): uint =
+  state shr asyncChannelRefShift
+
+proc misuse(op: static string) {.noreturn, noinline.} =
+  raiseAssert "AsyncChannel." & op & " on a channel that is not open"
+
+proc beginOp[T](tc: ptr AsyncChannel[T]): bool =
+  while true:
+    var state = tc.state.load(moAcquire)
+
+    if (state and asyncChannelOpenBit) == 0 or
+        (state and asyncChannelClosingBit) != 0:
+      return false
+
+    let desired = state + asyncChannelRefUnit
+    if tc.state.compareExchange(state, desired, moAcquireRelease, moAcquire):
+      return true
+
+proc endOp[T](tc: ptr AsyncChannel[T]) {.inline.} =
+  discard tc.state.fetchSub(asyncChannelRefUnit, moAcquireRelease)
 
 # TODO https://github.com/nim-lang/Nim/pull/25318
 template tryRecv2*(c: var Channel): untyped =
@@ -81,21 +114,42 @@ template send2*(c: var Channel, msg: auto) =
 proc open*(tc: var AsyncChannel): Result[void, string] =
   ## Prepare the channel for writing - open can fail if therer are not enough
   ## system resources (file descriptors) for the signalling mechanism.
+  if tc.state.load(moAcquire) != 0:
+    return err("AsyncChannel.open on a channel that is already open or closed")
+
   tc.sig = ?ThreadSignalPtr.new()
   # It should not matter that the channel is created in shared memory (since it
   # does not interact with the GC at all) but just to be safe, let's do like the
   # documentation suggests and allocate it like so.
   tc.chan = createShared(typeof(tc.chan[]))
   tc.chan[].open(0)
+  tc.state.store(asyncChannelOpenBit, moRelease)
 
   ok()
 
 proc close*(tc: var AsyncChannel) =
-  ## Release the resources used by the chanel - before calling, ensure that no
-  ## threads are waiting to send or receive data and that all related futures
-  ## have are finished.
-  if tc.sig.isNil:
-    return
+  ## Release the resources used by the chanel.
+  ##
+  ## Once `close` starts, new operations are rejected and blocked receivers are
+  ## woken up until all in-flight operations have left the shared state.
+  while true:
+    var state = tc.state.load(moAcquire)
+
+    if (state and asyncChannelOpenBit) == 0 or
+        (state and asyncChannelClosingBit) != 0:
+      return
+
+    let desired = state or asyncChannelClosingBit
+    if tc.state.compareExchange(state, desired, moAcquireRelease, moAcquire):
+      break
+
+  while true:
+    discard tc.sig.fireSync()
+
+    if tc.state.load(moAcquire).activeOps == 0:
+      break
+
+    sleep(1)
 
   discard tc.sig.close()
   reset tc.sig
@@ -104,6 +158,7 @@ proc close*(tc: var AsyncChannel) =
   tc.chan.deallocShared()
 
   reset tc.chan
+  tc.state.store(asyncChannelClosingBit, moRelease)
 
 template deepCopyHint(T: typedesc) =
   when asyncchannelsHints and (not defined(gcDestructors)) and
@@ -120,12 +175,20 @@ proc recv*[T](
   ##
   ## Operation may be cancelled.
   ##
-  ## Calling this function  on a channel that has not been opened or has already
-  ## been closed is undefined behavior and may lead to panics or blocked threads.
+  ## Calling this function on a channel that has not been opened yet or that is
+  ## closing raises an assertion defect.
 
   deepCopyHint(T)
 
+  if not tc.beginOp():
+    misuse("recv")
+  defer:
+    tc.endOp()
+
   while true:
+    if (tc.state.load(moAcquire) and asyncChannelClosingBit) != 0:
+      misuse("recv")
+
     let (dataAvailable, msg) = tc.chan[].tryRecv2()
 
     if dataAvailable:
@@ -146,6 +209,8 @@ proc recv*[T](
     try:
       await tc.sig.wait()
     except AsyncError as exc:
+      if (tc.state.load(moAcquire) and asyncChannelClosingBit) != 0:
+        misuse("recv")
       raiseAssert exc.msg
 
 proc sendSync*[T, U](tc: var AsyncChannel[T], msg: sink U) =
@@ -154,11 +219,17 @@ proc sendSync*[T, U](tc: var AsyncChannel[T], msg: sink U) =
   ## process them - the limit is OS-dependent due to the cross-thread signalling
   ## mechanism used.
   ##
-  ## Calling this function  on a channel that has not been opened or has already
-  ## been closed is undefined behavior and may lead to panics or blocked threads.
+  ## Calling this function on a channel that has not been opened yet or that is
+  ## closing raises an assertion defect.
   ##
   ## TODO https://github.com/status-im/nim-chronos/issues/604
   deepCopyHint(T)
+
+  if not (addr tc).beginOp():
+    misuse("sendSync")
+  defer:
+    (addr tc).endOp()
+
   tc.chan[].send2(move(msg))
   # Reader will fire in case we need another notification
   discard tc.sig.fireSync()
