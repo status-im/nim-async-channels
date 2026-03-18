@@ -91,8 +91,7 @@ proc beginOp[T](tc: ptr AsyncChannel[T]): bool =
   while true:
     var state = tc.state.load(moAcquire)
 
-    if (state and asyncChannelOpenBit) == 0 or
-        (state and asyncChannelClosingBit) != 0:
+    if (state and asyncChannelOpenBit) == 0 or (state and asyncChannelClosingBit) != 0:
       return false
 
     let desired = state + asyncChannelRefUnit
@@ -135,8 +134,7 @@ proc close*(tc: var AsyncChannel) =
   while true:
     var state = tc.state.load(moAcquire)
 
-    if (state and asyncChannelOpenBit) == 0 or
-        (state and asyncChannelClosingBit) != 0:
+    if (state and asyncChannelOpenBit) == 0 or (state and asyncChannelClosingBit) != 0:
       return
 
     let desired = state or asyncChannelClosingBit

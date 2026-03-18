@@ -238,8 +238,12 @@ suite "AsyncChannels":
     chan.open().expect("can open channel")
 
     var sendsOk, sendsClosed, recvsOk, recvsClosed: Atomic[int]
-    var producerThreads = newSeq[Thread[(ptr AsyncChannel[int], ptr Atomic[int], ptr Atomic[int])]](producers)
-    var consumerThreads = newSeq[Thread[(ptr AsyncChannel[int], ptr Atomic[int], ptr Atomic[int])]](consumers)
+    var producerThreads = newSeq[
+      Thread[(ptr AsyncChannel[int], ptr Atomic[int], ptr Atomic[int])]
+    ](producers)
+    var consumerThreads = newSeq[
+      Thread[(ptr AsyncChannel[int], ptr Atomic[int], ptr Atomic[int])]
+    ](consumers)
 
     proc prod(p: (ptr AsyncChannel[int], ptr Atomic[int], ptr Atomic[int])) {.thread.} =
       for i in 0 ..< 5000:
