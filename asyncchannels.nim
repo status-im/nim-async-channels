@@ -91,7 +91,7 @@ proc open*(tc: var AsyncChannel): Result[void, string] =
   ok()
 
 proc close*(tc: var AsyncChannel) =
-  ## Release the resources used by the chanel - before calling, ensure that no
+  ## Release the resources used by the channel - before calling, ensure that no
   ## threads are waiting to send or receive data and that all related futures
   ## have are finished.
   if tc.sig.isNil:
