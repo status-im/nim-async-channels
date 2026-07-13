@@ -1,6 +1,6 @@
 {.push raises: [], gcsafe.}
 
-import std/typetraits, chronos, chronos/threadsync, results
+import std/[atomics, typetraits], chronos, chronos/threadsync, results
 
 export chronos, threadsync, results
 
@@ -134,20 +134,16 @@ proc recv*[T](
     # chance to look (and potentially re-fire the event in case there is more
     # work).
 
-    while tc.chan[].count.load(moAcquire) > 0:
+    while tc[].count.load(moAcquire) > 0:
       let (dataAvailable, msg) = tc.chan[].tryRecv2()
 
       if dataAvailable:
-        let items = tc.chan[].count.fetchAdd(-1, moAcquireRelease)
+        let items = tc[].count.fetchAdd(-1, moAcquireRelease)
         if items > 1:
           # Depending on the OS, ThreadSignalPtr will wake up only one thread even
           # though `fire` has been called multiple times - if there are still
           # items in the queue at this stage, schedule another thread to work on
           # them.
-          # This trick also solves a race condition where other threads might get
-          # stuck during shutdown, if a single thread swallows the wake-up
-          # notification for multiple "shutdown" markers being posted to the
-          # channel.
           # The downside of this approach is that it leads to spurious wake-ups
           # and a bit of overhead.
           discard tc.sig.fireSync()
@@ -170,7 +166,7 @@ proc sendSync*[T, U](tc: var AsyncChannel[T], msg: sink U) =
   ## TODO https://github.com/status-im/nim-chronos/issues/604
   deepCopyHint(T)
   # Increase the counter before adding to the list
-  tc.chan[].count.add(1, moRelease) # moRelaxed?
+  discard tc.count.fetchAdd(1, moRelease) # moRelaxed?
   tc.chan[].send2(move(msg))
   # Reader will fire in case we need another notification
   discard tc.sig.fireSync()
