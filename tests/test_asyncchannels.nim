@@ -1,5 +1,5 @@
 import ../asyncchannels, unittest2
-import std/[os, atomics]
+import std/[atomics]
 
 suite "AsyncChannels":
   test "Same thread, int":
