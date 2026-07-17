@@ -8,14 +8,21 @@ const asyncchannelsHints {.booldefine.} = true
 
 type
   AsyncChannel*[TMsg] = object
-    ## Async, unbounded MPMC channel suitable for usage with chronos' `async`
-    ## event loop, similar to the built-in Nim `Channel`. This version of the
-    ## channel is compatible with both `refc` and `orc`.
+    ## Unbounded MPMC channel suitable for bridging threads to chronos' `async`
+    ## event loop`.
+    ##
+    ## The sender side may be any thread (chronos or not).
+    ##
+    ## The receiver side must be a `chronos` event loop - wakeup notifications
+    ## are posted to the event loop owning the reader.
+    ##
+    ## The channel is compatible with both `refc` and `orc`.
     ##
     ## Channel lifetime is controlled by `open` and `close` - before `close` is
     ## used, the caller is responsible for making sure that all work posted to
     ## the channel has been drained and that no threads are waiting for work, or
-    ## memory leaks and crashes may happen.
+    ## memory leaks and crashes may happen. Failure to close leads to memory
+    ## leaks.
     ##
     ## Performance-wise, the channel is suitable for use cases where tasks are:
     ##
@@ -71,16 +78,18 @@ type
     count: int
 
     lock: Lock
-    data: ptr UncheckedArray[ptr Waiter[TMsg]]
-    len, cap: int
+    whead, wtail: ptr Waiter[TMsg]
 
   Waiter*[TMsg] = object
-    ## Waiters are readers that arrived when there were no items in the queue -
-    ## there is currently no fair ordering between waiters, ie a later arrival
-    ## might steal items from an earlier waiter.
+    ## Waiters are readers that arrived when there were no items in the queue.
+    ##
+    ## Waiters get via `callSoon` when an item arrives - when there are multiple
+    ## consumer threads (ie multiple event loops), work may be stolen by another
+    ## thread the waiter is waking up.
     tc: ptr AsyncChannel[TMsg]
     pdisp: PDispatcher
     fut: pointer
+    next: ptr Waiter[TMsg]
 
 proc `=copy`[TMsg](v: var AsyncChannel[TMsg], b: AsyncChannel[TMsg]) {.error.}
 
@@ -104,16 +113,41 @@ proc open*(tc: var AsyncChannel): Result[void, string] =
   tc.chan[].open(0)
 
   initLock tc.lock
-  tc.len = 0
-  tc.cap = 0
-  tc.data = nil
+  tc.whead = nil
+  tc.wtail = nil
 
   ok()
+
+proc pushWaiter[TMsg](tc: var AsyncChannel[TMsg], w: ptr Waiter[TMsg]) =
+  ## Add a Waiter to the tail of the intrusive linked list (FIFO).
+  w.next = nil
+  if tc.wtail != nil:
+    tc.wtail.next = w
+  else:
+    tc.whead = w
+  tc.wtail = w
+
+proc popWaiter[TMsg](tc: var AsyncChannel[TMsg]): ptr Waiter[TMsg] =
+  ## Remove and return the head Waiter from the intrusive linked list.
+  ## Skips cancelled waiters (w.fut == nil) and deallocates their node.
+  while tc.whead != nil:
+    let w = tc.whead
+    if w.fut != nil:
+      tc.whead = w.next
+      if tc.whead == nil:
+        tc.wtail = nil
+      return w
+    # Cancelled waiter — skip and dealloc
+    tc.whead = w.next
+    if tc.whead == nil:
+      tc.wtail = nil
+    deallocShared(w)
 
 proc close*(tc: var AsyncChannel) =
   ## Release the resources used by the channel - before calling, ensure that no
   ## threads are waiting to send or receive data and that all related futures
-  ## have are finished.
+  ## have are finished - the easiest way to do so is to post a sentinel value
+  ## for each waiter that shuts it down.
   if tc.chan == nil:
     return
 
@@ -121,36 +155,13 @@ proc close*(tc: var AsyncChannel) =
   chan[].close()
   chan.deallocShared()
 
-  if tc.len > 0:
-    deallocShared tc.data
+  block:
+    acquire tc.lock
+    defer:
+      release tc.lock
 
+    doAssert tc.popWaiter() == nil
   deinitLock tc.lock
-
-proc waiterAdd(tc: var AsyncChannel, w: ptr Waiter) =
-  ## Add a Waiter into the shared data array. Reallocates capacity if needed.
-  if tc.len >= tc.cap:
-    # Grow by 2x, minimum initial cap of 8
-    let newCap = max(tc.cap * 2, 8)
-    let newData = cast[ptr UncheckedArray[ptr Waiter]](
-      createSharedU(ptr Waiter, newCap))
-    if tc.len > 0 and tc.data != nil:
-      copyMem(addr newData[0], addr tc.data[0], tc.len * sizeof(Waiter))
-      deallocShared tc.data
-    tc.data = newData
-    tc.cap = newCap
-
-  tc.data[tc.len] = w
-  inc tc.len
-
-proc waiterRemove(tc: var AsyncChannel, v: var ptr Waiter): bool =
-  ## Remove and return the last Waiter from the shared data array.
-  if tc.len > 0:
-    dec tc.len
-
-    v = tc.data[tc.len]
-    true
-  else:
-    false
 
 proc deepCopyHint(T: typedesc) =
   when asyncchannelsHints and (not defined(gcDestructors)) and
@@ -171,6 +182,26 @@ proc recvImpl[TMsg](tc: ptr AsyncChannel[TMsg], fut: Future[TMsg]): bool =
       return true
 
   false
+
+proc completeWaiter[TMsg](udata: pointer) {.nimcall, gcsafe, raises: [].} =
+  let w = cast[ptr Waiter[TMsg]](udata)
+  if w.fut != nil:
+    let
+      fut = cast[Future[TMsg]](w.fut)
+      tc = w.tc
+
+    # Keep the lock while we check the queue so that `pushWaiter` doesn't
+    # get interleaved with a concurrent `popWaiter` that would say "no
+    # waiters"
+
+    acquire tc[].lock
+    defer:
+      release tc[].lock
+    if w.tc.recvImpl(fut):
+      deallocShared(w)
+    else:
+      # The item was stolen from us, try again later
+      w.tc[].pushWaiter(w)
 
 proc recv*[TMsg](
     tc: ptr AsyncChannel[TMsg]
@@ -201,17 +232,18 @@ proc recv*[TMsg](
 
     w.tc = tc
     w.fut = cast[pointer](fut)
+    w.next = nil
     w.pdisp = getThreadDispatcher()
 
-    tc[].waiterAdd(w)
+    tc[].pushWaiter(w)
 
   fut
 
 proc sendSync*[TMsg, U](tc: var AsyncChannel[TMsg], msg: sink U) =
-  ## Send `msg` on the channel synchronously - this function may block when too
-  ## many tasks have been posted to the channel and no consumer is there to
-  ## process them - the limit is OS-dependent due to the cross-thread signalling
-  ## mechanism used.
+  ## Send `msg` on the channel. As the channel is unbounded, this function will
+  ## never block.
+  ##
+  ## The caller is responsible for managing backpressure.
   ##
   ## Calling this function  on a channel that has not been opened or has already
   ## been closed is undefined behavior and may lead to panics or blocked threads.
@@ -219,43 +251,19 @@ proc sendSync*[TMsg, U](tc: var AsyncChannel[TMsg], msg: sink U) =
   ## TODO https://github.com/status-im/nim-chronos/issues/604
   deepCopyHint(TMsg)
 
-  acquire tc.lock
-  defer:
-    release tc.lock
+  let w = block:
+    acquire tc.lock
+    defer:
+      release tc.lock
 
-  # Increase the counter before adding to the list
-  tc.count += 1
-  tc.chan[].send2(move(msg))
+    # Increase the counter before adding to the list
+    tc.count += 1
+    tc.chan[].send2(move(msg))
 
-  while true:
-    var w: ptr Waiter[TMsg]
-    if not tc.waiterRemove(w):
+    let w = tc.popWaiter()
+    if w == nil:
       return # No waiters
+    w
 
-    if w.fut == nil:
-      deallocShared(w)
-      continue # Waiter got cancelled
-
-    # A waiter is available - wake up their dispatcher
-    proc comp(udata: pointer) {.nimcall, gcsafe, raises: [].} =
-      let w = cast[ptr Waiter[TMsg]](udata)
-      if w.fut != nil:
-        let
-          fut = cast[Future[TMsg]](w.fut)
-          tc = w.tc
-
-        # Keep the lock while we check the queue so that `waiterAdd` doesn't
-        # get interleaved with a concurrent `waiterRemove` that would say "no
-        # waiters"
-
-        acquire tc[].lock
-        defer:
-          release tc[].lock
-        if w.tc.recvImpl(fut):
-          deallocShared(w)
-        else:
-          # The item was stolen from us, try again later
-          w.tc[].waiterAdd(w)
-
-    w.pdisp.callSoon(comp, w)
-    return # Waiter queued for processing
+  # A waiter is available - wake up their dispatcher
+  w.pdisp.callSoon(completeWaiter[TMsg], w)

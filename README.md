@@ -20,6 +20,7 @@ Key implementation details:
   not: prefer manually managed memory and off-channel buffers.
 - Internals: Wraps a Nim `Channel[T]` and uses `chronos`' `ThreadSignalPtr` to
   wake the consumer event loop.
+- Sender can be any thread (chronos or not), receiver must be chronos event loop
 
 ## Getting started
 
