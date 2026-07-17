@@ -7,7 +7,7 @@ license = "MIT"
 
 # Earlier nim versions may be supported but haven't been tested and have
 # significant bugs when used with ORC.
-requires "nim >= 2.0.14", "chronos >= 4.0.4 & < 5.0.0", "results >= 0.5.1", "nimcrypto"
+requires "nim >= 2.0.14", "chronos#thread-call-soon", "results >= 0.5.1", "nimcrypto"
 
 proc test(env, path: string) =
   exec "nim c " & env & " -r " & path
