@@ -167,9 +167,8 @@ proc deepCopyHint(T: typedesc) =
   when asyncchannelsHints and (not defined(gcDestructors)) and
       (not supportsCopyMem(T) or sizeof(T) > 64):
     when (NimMajor, NimMinor) >= (2, 2):
-      {.
-        hint: $T & " deep-copied - references are not preserved and copy may be slow"
-      .}
+      {.hint: $T & " deep-copied - references are not preserved and copy may be slow".}
+
 proc recvImpl[TMsg](tc: ptr AsyncChannel[TMsg], fut: Future[TMsg]): bool =
   while tc[].count > 0:
     # `tryRecv` might fail due to contention so we need to keep trying until
