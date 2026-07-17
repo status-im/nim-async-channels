@@ -87,7 +87,7 @@ type
     ## consumer threads (ie multiple event loops), work may be stolen by another
     ## thread the waiter is waking up.
     tc: ptr AsyncChannel[TMsg]
-    pdisp: PDispatcher
+    disp: DispatcherHandle
     fut: pointer
     next: ptr Waiter[TMsg]
 
@@ -233,7 +233,7 @@ proc recv*[TMsg](
     w.tc = tc
     w.fut = cast[pointer](fut)
     w.next = nil
-    w.pdisp = getThreadDispatcher()
+    w.disp = getThreadDispatcher().handle()
 
     tc[].pushWaiter(w)
 
@@ -266,4 +266,4 @@ proc sendSync*[TMsg, U](tc: var AsyncChannel[TMsg], msg: sink U) =
     w
 
   # A waiter is available - wake up their dispatcher
-  w.pdisp.callSoon(completeWaiter[TMsg], w)
+  w.disp.callSoon(completeWaiter[TMsg], w)
