@@ -7,7 +7,8 @@ license = "MIT"
 
 # Earlier nim versions may be supported but haven't been tested and have
 # significant bugs when used with ORC.
-requires "nim >= 2.0.14", "chronos#thread-call-soon", "results >= 0.5.1", "nimcrypto"
+requires "nim >= 2.0.14",
+  "chronos#b71392a13df707c0f02162b07caaddac2dd0103c", "results >= 0.5.1", "nimcrypto"
 
 proc test(env, path: string) =
   exec "nim c " & env & " -r " & path
@@ -19,5 +20,9 @@ task test, "Runs the test suite":
     else:
       ["tests/test_asyncchannels.nim"]
   for f in tests:
-    for opt in ["--mm:orc", "--mm:refc", "-d:release -d:gcAssert -d:sysAssert"]:
+    # TODO https://github.com/nim-lang/Nim/issues/26014
+    for opt in [
+      "--mm:orc -d:useMalloc", "--mm:refc",
+      "--mm:refc -d:release -d:useGcAssert -d:useSysAssert",
+    ]:
       test opt, f

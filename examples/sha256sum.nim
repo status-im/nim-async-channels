@@ -123,9 +123,6 @@ template SomeChannel[T](async: static bool): typedesc =
   else:
     Channel[Opt[T]]
 
-template send(c: AsyncChannel, msg: auto): untyped =
-  c.sendSync(msg)
-
 template TArg[A, B](async: static bool): typedesc =
   tuple[r: ptr SyncChannel[A], w: ptr SomeChannel[B](async), p: IoProc[A, B]]
 
@@ -187,7 +184,7 @@ proc open(v: var Pipeline) =
   when v.digestChan is Channel:
     v.digestChan.open()
   else:
-    v.digestChan.open().expect("can open channels")
+    v.digestChan.init()
 
   v.readThread.createThread(
     pipelineWorker[v.readThread.TArg], (addr v.readChan, addr v.hashChan, readDataTask)
@@ -197,9 +194,12 @@ proc open(v: var Pipeline) =
   )
 
 proc close(v: var Pipeline) =
-  v.readChan.close()
-  v.hashChan.close()
-  v.digestChan.close()
+  when v.digestChan is Channel:
+    v.digestChan.close()
+  else:
+    # We assume the readers already have stopped, meaning that we don't need to
+    # close the channel first
+    v.digestChan.destroy()
 
   joinThread(v.readThread)
   joinThread(v.hashThread)
@@ -268,14 +268,20 @@ type
     loop: Future[void]
 
 proc close(p: var Pool) =
+  # Signal the async loop to stop
   p.loop.cancelSoon()
 
+  # Send sentinel to each IO worker so they exit their loops
   for i in 0 ..< p.workers.len:
     p.r.send2(Opt.none(p.r.TMsg.T))
 
+  # Join all IO workers
   for w in p.workers.mitems():
     w.joinThread()
   p.workers.reset()
+
+  # Destroy the async channel now that all readers are gone
+  p.w.destroy()
 
 proc computeHash(name: string): NamedRes[Digest] =
   hashTask(readDataTask(name))
@@ -318,7 +324,7 @@ proc new[Args, Result](
   let res = (ref Pool[Args, Result])(workers: newSeq[Thread[Io[Args, Result]]](threads))
 
   res.r.open()
-  res.w.open().expect("working channel")
+  res.w.init()
 
   for w in res.workers.mitems():
     w.createThread(ioworker, Io[Args, Result](r: addr res.r, w: addr res.w, p: io))
