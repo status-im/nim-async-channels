@@ -12,13 +12,13 @@ Key implementation details:
 
 - Copies: In `refc`, items are deep-copied by the underlying `Channel` while
   holding a lock. Keep messages small or pass handles to off-channel buffers.
-- open/close: open allocates signaling resources (can fail), close must be
-  called once the channel is drained and no tasks are waiting.
+- Memory: Memory usage grows when producers outpace consumers - make sure to
+  bound your producers
 - Chronos-only wakeups: `AsyncChannel` can wake `chronos`-managed threads/tasks.
   It cannot wake non-`chronos` threads — use plain `Channel` for that direction.
 - GC compatibility: the channel works with `refc` and `orc` but your payload may
   not: prefer manually managed memory and off-channel buffers.
-- Internals: Wraps a Nim `Channel[T]` and uses `chronos`' `ThreadSignalPtr` to
+- Internals: Wraps a Nim `Channel[T]` and uses `chronos`' `callSoon` to
   wake the consumer event loop.
 - Sender can be any thread (chronos or not), receiver must be chronos event loop
 
@@ -39,8 +39,8 @@ var chan: AsyncChannel[string]
 
 proc fill(p: ptr AsyncChannel[string]) {.thread.} =
   for i in 0 ..< 10:
-    p[].sendSync($i)
-  p[].sendSync("")
+    p[].send($i)
+  p[].close()
 
 proc main(chan: ptr AsyncChannel[string]) {.async.} =
   chan[].open().expect("can open channel")
@@ -50,7 +50,7 @@ proc main(chan: ptr AsyncChannel[string]) {.async.} =
 
   while true:
     let str = await chan.recv()
-    if str.len == 0: # sentinel
+    if str.len == 0: # close shows up as default(T)
       break
     echo str
 
@@ -62,12 +62,16 @@ waitFor main(addr chan)
 
 Getting started checklist:
 
-- Small messages / control or handles: Post small structs/ids/handles on the channel; store payloads in shared memory (see examples/sharedbuf.nim).
+- Small messages / control or handles: Post small structs/ids/handles on the
+  channel; store payloads in shared memory (see examples/sharedbuf.nim).
 - Sentinel/Opt pattern: Use `Opt[T]` or a sentinel value to signal shutdown.
-- Backpressure: Use bounded producers or limit inflight tasks on the producer side to avoid unbounded memory growth
-- MPSC usage: Prefer a single consumer thread (the Chronos loop that created the channel). While multiple consumers work, the common pattern is MPSC with one event-loop consumer.
-- Fine-grained tasks: For many tiny tasks, prefer taskpools (e.g. nim-taskpools) and post only final results to channels.
-
+- Backpressure: Use bounded producers or limit inflight tasks on the producer
+  side to avoid unbounded memory growth
+- MPSC usage: Prefer a single consumer thread (the Chronos loop that created the
+  channel). While multiple consumers work, the common pattern is MPSC with one
+  event-loop consumer.
+- Fine-grained tasks: For many tiny tasks, prefer taskpools (e.g. nim-taskpools)
+  and post only final results to channels.
 
 ## Examples
 
@@ -100,7 +104,7 @@ tasks to wake up the event dispatcher as items arrive on the channel.
 * thread pools such as [`taskpools`](https://github.com/status-im/nim-taskpools/)
 * FFI, such as when integrating `chronos` with a foreign scheduler
 
-`AsyncChannel` can not wake non-chronos threads and therefore cannot be used for
+`AsyncChannel` cannot wake non-chronos threads and therefore cannot be used for
 posting work to threads that are not managed by `chronos` - when posting work to
 such threads, use a channel implementation suitable for that environment:
 

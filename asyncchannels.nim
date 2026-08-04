@@ -289,7 +289,7 @@ proc recv*[TMsg](
     release tc[].lock
 
   if not tc[].recvImpl(fut):
-    var w = createShared(Waiter[TMsg])
+    let w = createShared(Waiter[TMsg])
 
     proc cancellation(udata: pointer) {.gcsafe, raises: [].} =
       if w.fut == nil: # Already processed
