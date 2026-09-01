@@ -82,15 +82,15 @@ type
 
     whead, wtail: ptr Waiter[TMsg]
 
-  Waiter*[TMsg] = object
+  Waiter[TMsg] = object
     ## Waiters are readers that arrived when there were no items in the queue.
     ##
     ## Waiters get notified via `callSoon` when an item arrives - when there are
     ## multiple dispatchers (ie multiple event loops/threads), work may be
     ## stolen by another thread while the waiter is waking up.
     ##
-    ## Stopping the dispatcher without cancelling its waiter causes undefined
-    ## behavior for the queue.
+    ## Stopping the dispatcher without cancelling all corresponding readers
+    ## is undefined behavior that will break the channel.
     tc: ptr AsyncChannel[TMsg]
     disp: DispatcherHandle
     fut: pointer
@@ -223,14 +223,18 @@ proc init*(tc: var AsyncChannel) =
   tc.count = 0
   tc.closed = false
 
-proc destroy*(tc: var AsyncChannel) =
+proc destroy*[TMsg](tc: var AsyncChannel[TMsg]) =
   ## Release the resources used by the channel.
   ##
   ## `destroy` is not thread-safe - it is the responsibility of the caller to
-  ## ensure that no readers and writers are accessing the channel.
+  ## ensure that no readers and writers are accessing the channel during and
+  ## after `destroy` - in particular, readers must not be queued.
   ##
   ## Use `close` to close the channel prior to destroying it - this will wake
   ## all pending readers allowing them to gracefully shut down.
+  ##
+  ## Any pending items in the queue will be dropped silently - similarly,
+  ## readers will not be notified or woken up.
   if tc.chan.isNil():
     return
 
@@ -240,7 +244,15 @@ proc destroy*(tc: var AsyncChannel) =
   chan.deallocShared()
   tc.count = 0
 
-  doAssert tc.popWaiter().isNil(), "Readers found during `destroy`"
+  var w = tc.popWaiter()
+  while w != nil:
+    if w.fut != nil:
+      let fut = cast[Future[TMsg]](move(w.fut))
+      GC_unref(fut)
+
+    deallocShared(w)
+
+    w = tc.popWaiter()
 
   deinitLock tc.lock
 
@@ -320,7 +332,6 @@ proc recv*[TMsg](
 
     w.tc = tc
     w.fut = cast[pointer](fut)
-    w.next = nil
     w.disp = getThreadDispatcher().handle()
 
     tc[].pushWaiter(w)
